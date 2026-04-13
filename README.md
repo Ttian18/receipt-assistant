@@ -54,46 +54,49 @@ Every extraction includes metadata stored as PostgreSQL JSONB:
 
 ## Quick Start
 
+The entire stack (Langfuse + receipt-assistant) is orchestrated by a single
+root `docker-compose.yml`. Everything runs in Docker — there is no `npm run
+dev` on the host.
+
 ### Prerequisites
 
-- Docker & Docker Compose
-- Claude Code CLI with active subscription
-- macOS (for Keychain-based OAuth token extraction)
+- Docker Desktop (or Docker Engine) with Compose v2.20+ (for `include:` support)
+- Claude Code CLI signed in on macOS (the OAuth token is read from the Keychain)
 
-### 1. Start Langfuse monitoring stack
-
-```bash
-cd langfuse/
-docker compose up -d
-# Dashboard: http://localhost:3333 (admin@local.dev / Admin123!)
-```
-
-### 2. Build and run the backend
+### 1. Set up the OAuth token
 
 ```bash
-# Extract OAuth token from macOS Keychain
-export CLAUDE_CODE_OAUTH_TOKEN=$(security find-generic-password \
-  -s "Claude Code-credentials" -w | \
-  python3 -c "import json,sys; print(json.load(sys.stdin)['claudeAiOauth']['accessToken'])")
-
-# Build
-docker build -t receipt-assistant .
-
-# Run (joins Langfuse network, shares its PostgreSQL)
-docker run -d \
-  --name receipt-assistant \
-  --network langfuse_default \
-  -p 3000:3000 -p 3001:3001 \
-  -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
-  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/receipts" \
-  -e LANGFUSE_HOST="http://langfuse-web:3000" \
-  -e LANGFUSE_PUBLIC_KEY="pk-receipt-local" \
-  -e LANGFUSE_SECRET_KEY="sk-receipt-local" \
-  -v receipt-data:/data \
-  receipt-assistant
+./scripts/refresh-token.sh
 ```
 
-### 3. Test with a receipt
+This copies `.env.example` to `.env` (if needed) and writes your current
+Claude Code OAuth token into it. Rerun it whenever `claude -p` calls start
+failing with auth errors — tokens expire periodically.
+
+### 2. Bring everything up
+
+```bash
+docker compose up -d --build
+```
+
+This single command:
+- starts the full Langfuse stack (postgres, clickhouse, minio, redis, web, worker)
+- builds the receipt-assistant image (multi-stage: tsc in a builder stage, lean runtime)
+- runs receipt-assistant on ports 3000 (REST) and 3001 (MCP)
+
+Langfuse dashboard: http://localhost:3333 (admin@local.dev / admin123)
+
+### 3. After changing source code
+
+```bash
+docker compose up -d --build receipt-assistant
+```
+
+Only the app is rebuilt; the Langfuse stack keeps running. Layer caching in
+the Dockerfile means unchanged `package.json` skips the `npm ci` step, so
+rebuilds are typically 10–20 seconds.
+
+### 4. Test with a receipt
 
 ```bash
 # Upload
