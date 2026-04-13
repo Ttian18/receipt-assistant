@@ -2,3 +2,8 @@ node_modules/
 dist/
 /data/
 *.db
+
+# Local secrets — use .env.example as the template
+.env
+.env.*
+!.env.example

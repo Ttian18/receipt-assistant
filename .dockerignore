@@ -1,0 +1,35 @@
+# Keep the build context small and prevent stale host artifacts from
+# leaking into the image. Anything the Dockerfile doesn't COPY can be
+# excluded here.
+
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Langfuse stack has its own compose file; its data volumes should
+# never enter the receipt-assistant build context.
+langfuse
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Docs (CLAUDE.md is explicitly re-included because Dockerfile needs it)
+*.md
+!CLAUDE.md
+
+# Local data / uploads
+data
+uploads
+*.db
+*.sqlite
+
+# CI / tests output
+coverage
+.nyc_output

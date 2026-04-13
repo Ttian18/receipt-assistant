@@ -1,0 +1,43 @@
+# Root compose file — one command brings up the whole stack:
+#
+#   docker compose up -d --build
+#
+# Langfuse (postgres, clickhouse, minio, redis, web, worker) is pulled in
+# verbatim from langfuse/docker-compose.yml via `include:` so we don't have
+# to duplicate its config here. receipt-assistant shares langfuse's postgres
+# instance (different database) for local dev simplicity.
+#
+# Requires Docker Compose v2.20+ for `include:` support.
+
+include:
+  - path: langfuse/docker-compose.yml
+
+services:
+  receipt-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: receipt-assistant:local
+    container_name: receipt-assistant
+    depends_on:
+      postgres:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_started
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      # Fail fast if the OAuth token isn't set in .env — better to error at
+      # `compose up` than to discover it after a failed claude -p call.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set CLAUDE_CODE_OAUTH_TOKEN in .env (run scripts/refresh-token.sh)}
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/receipts
+      LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_PUBLIC_KEY: pk-receipt-local
+      LANGFUSE_SECRET_KEY: sk-receipt-local
+    volumes:
+      - receipt-data:/data
+    restart: unless-stopped
+
+volumes:
+  receipt-data:

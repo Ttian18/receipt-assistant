@@ -1,24 +1,55 @@
-FROM node:22-bookworm
+# syntax=docker/dockerfile:1.6
+#
+# Multi-stage build for receipt-assistant.
+#
+#   builder  — installs full deps (incl. devDependencies), compiles TypeScript,
+#              then prunes to production deps.
+#   runtime  — minimal image that only contains dist/ + production node_modules
+#              + the claude CLI.
+#
+# Both stages use node:22-bookworm so that native modules compiled in the
+# builder stage are ABI-compatible with the runtime stage (same glibc, same
+# node ABI).
 
-# Install build tools for native modules (better-sqlite3) + claude CLI
-RUN apt-get update && apt-get install -y \
-    python3 \
-    make \
-    g++ \
-    curl \
-    postgresql-client \
+# ---- Stage 1: builder ----
+FROM node:22-bookworm AS builder
+
+WORKDIR /app
+
+# Install full deps first (cached layer as long as package*.json is unchanged)
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# Copy sources and build
+COPY tsconfig.json ./
+COPY src/ ./src/
+RUN npm run build
+
+# Drop devDependencies so the runtime stage can copy a lean node_modules
+RUN npm prune --production
+
+# ---- Stage 2: runtime ----
+FROM node:22-bookworm AS runtime
+
+# Build tools kept for any on-demand native rebuilds; postgresql-client is
+# handy for debugging (psql) and curl is used by healthchecks / entrypoint.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        make \
+        g++ \
+        curl \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
+# Claude Code CLI — invoked by src/claude.ts as a subprocess.
 RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
-
-# Copy compiled output (build happens outside Docker)
-COPY dist/ ./dist/
-COPY CLAUDE.md ./
+# Copy compiled output and production node_modules from the builder stage.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY package.json CLAUDE.md ./
 COPY docker/entrypoint.sh /app/docker/entrypoint.sh
 
 ENV NODE_ENV=production
