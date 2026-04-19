@@ -27,6 +27,7 @@ import {
   ingestsRouter,
 } from "./routes/ingest.js";
 import { reconcileRouter } from "./routes/reconcile.js";
+import { reportsRouter } from "./routes/reports.js";
 
 export function buildApp(): Express {
   const app = express();
@@ -66,6 +67,7 @@ export function buildApp(): Express {
   app.use("/v1/batches", reconcileRouter);
   app.use("/v1/batches", batchesRouter);
   app.use("/v1/ingests", ingestsRouter);
+  app.use("/v1/reports", reportsRouter);
 
   // ── Final error handler ─────────────────────────────────────────────
   app.use(problemHandler);
