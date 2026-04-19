@@ -195,7 +195,7 @@ async function postBatch(files: Array<{ name: string; tag: string }>) {
 // ──────────────────────────────────────────────────────────────────────
 
 describe("GET /v1/batches/:id/stream", () => {
-  it("relays job.started/done + batch.extracted while draining a 3-file batch", async () => {
+  it("relays job.done + batch.extracted while draining a 3-file batch", async () => {
     resetGate();
     const res = await postBatch([
       { name: "image-a.jpg", tag: "a" },
@@ -206,8 +206,15 @@ describe("GET /v1/batches/:id/stream", () => {
     const batchId = res.body.batchId as string;
 
     // Subscribe BEFORE releasing the extractor. The gate blocks the
-    // worker in `extractor()` until `openGate()` is called, so there's
-    // no drain-before-subscribe race regardless of runner speed.
+    // worker inside `currentExtractor()` so the terminal events
+    // (job.done, batch.extracted) land while we're subscribed.
+    //
+    // NOTE: `job.started` fires in the worker *before* `await extractor`,
+    // which on fast CI runners happens before the HTTP fetch handshake
+    // completes even with the gate in place. SSE semantics give late
+    // subscribers a catch-up `hello` frame, not a replay of bus events,
+    // so we deliberately do not assert on job.started counts here.
+    // Terminal events are the observable contract.
     const controller = new AbortController();
     const streamRes = await fetch(`${baseUrl}/v1/batches/${batchId}/stream`, {
       signal: controller.signal,
@@ -221,8 +228,9 @@ describe("GET /v1/batches/:id/stream", () => {
     // Reader is ready; let the worker proceed.
     openGate();
 
-    // Expect: 1× hello + 3× job.started + 3× job.done + 1× batch.extracted
-    // = 8 events. Allow slack for interleaving order.
+    // Minimum expected: 1× hello + 3× job.done + 1× batch.extracted = 5.
+    // Allow up to 8 to capture any job.started events that happened to
+    // be observed after subscription (0–3 depending on scheduler).
     const frames = await readSse(streamRes, 8, 10_000);
     controller.abort();
 
@@ -236,12 +244,10 @@ describe("GET /v1/batches/:id/stream", () => {
       (acc[f.event] ??= []).push(f);
       return acc;
     }, {});
-    // After a 3-file batch fully drains we should see:
-    //   3× job.started (one per file)
-    //   3× job.done    (one per file)
-    //   1× batch.extracted (emitted once by the worker when the last
-    //                       ingest terminates)
-    expect(byEvent["job.started"]?.length ?? 0).toBe(3);
+    // After a 3-file batch fully drains subscribers must see:
+    //   3× job.done        (terminal per file)
+    //   1× batch.extracted (emitted once when the last ingest terminates)
+    // job.started is best-effort (see note above).
     expect(byEvent["job.done"]?.length ?? 0).toBe(3);
     expect(byEvent["batch.extracted"]?.length ?? 0).toBe(1);
 
