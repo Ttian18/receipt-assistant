@@ -6,31 +6,24 @@ An open-source, AI-native receipt parsing backend that extracts structured data 
 
 ```
                      ┌──────────────┐
-  Receipt Image ───► │  Express API │ ───► PostgreSQL
-  (POST /receipt)    │   :3000      │      (receipts db)
-                     └──────┬───────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-         Phase 1       Phase 2        Langfuse
-         Quick OCR     Two-Step       Auto-Ingest
-         (3-5s)        Pipeline       (traces + generations)
-         merchant      1. Text OCR    ┌─────────────┐
-         date          + reasoning    │ Langfuse     │
-         total         2. JSON        │ Dashboard    │
-                       structuring    │ :3333        │
-                       + quality      └─────────────┘
-                       flags
+  Receipt Image ───► │  Express API │ ───► PostgreSQL (receipts db)
+  (POST /receipt)    │   :3000      │              ▲
+                     └──────┬───────┘              │
+                            │                      │ writes via psql tool
+                            ▼                      │
+                  ┌── Single-call agent ──┐        │
+                  │   claude -p           │────────┘
+                  │   reads image         │
+                  │   reasons in text     │        ┌─────────────┐
+                  │   writes to Postgres  │───────►│ Langfuse    │
+                  │   via psql tool call  │        │ :3333       │
+                  └───────────────────────┘        │ auto-ingest │
+                                                   └─────────────┘
 ```
 
-### Two-Step Pipeline
+### Single-call agent pipeline
 
-We discovered that `--json-schema` constrains Claude's output format and **degrades OCR accuracy** (4/10 dates wrong vs 0/10 with plain text). Our solution:
-
-1. **Step 1**: Plain text OCR with chain-of-thought reasoning (no schema constraint)
-2. **Step 2**: Structure the OCR text into JSON (with schema constraint, but no image reading)
-
-This separation lets the model reason about ambiguous characters ("is this a 3 or 9?") before committing to a structured output.
+`--json-schema` mode constrains Claude's output format and **degrades OCR accuracy** (4/10 dates wrong vs 0/10 with plain text), because it skips chain-of-thought reasoning. The current flow (`src/claude.ts::processReceipt`) is a **single `claude -p` invocation** that reads the image, reasons about ambiguous characters in plain text, and writes the extracted fields directly to Postgres via a `psql` tool call — no JSON-schema coercion anywhere. A placeholder receipt row is seeded at upload time and `UPDATE`d by the agent. Full A/B rationale and the prior two-phase variant (kept around for anyone benchmarking a return) live in [`CLAUDE.md`](CLAUDE.md#known-pitfalls).
 
 ### Quality & Business Flags
 
@@ -133,6 +126,8 @@ curl http://localhost:3000/receipt/<receiptId> | jq .
 
 ## API Reference
 
+The machine-readable contract is `openapi/openapi.json` (committed; OpenAPI 3.1). The table below is for quick reference — the spec is the source of truth.
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/receipt` | Upload receipt image, returns jobId for async processing |
@@ -141,9 +136,23 @@ curl http://localhost:3000/receipt/<receiptId> | jq .
 | `GET` | `/receipts` | List receipts (`?from=&to=&category=&limit=`) |
 | `GET` | `/receipt/:id` | Get single receipt with line items |
 | `DELETE` | `/receipt/:id` | Delete a receipt |
+| `GET` | `/receipt/:id/image` | Serve the original receipt image |
 | `GET` | `/summary` | Spending summary by category (`?from=&to=`) |
 | `POST` | `/ask` | Ask a natural language question about spending |
 | `GET` | `/health` | Health check |
+
+### OpenAPI contract (for client codegen)
+
+Frontend, macOS, and any future client generate typed bindings from `openapi/openapi.json` instead of hand-writing `fetch` / `URLSession` calls.
+
+| File / command | Purpose |
+|---------------|---------|
+| `openapi/openapi.json` | Generated spec — **commit-tracked**, source of truth for SDK codegen |
+| `src/schemas/*.ts` | One zod schema per resource (`receipt`, `job`, `summary`, `ask`, `health`, `common`) |
+| `src/openapi.ts` | Route registry: maps schemas to all 9 paths / 10 method+path pairs |
+| `npm run openapi:generate` | Regenerate `openapi/openapi.json` after editing schemas |
+
+See [`CLAUDE.md` → Schema editing workflow](CLAUDE.md#schema-editing-workflow-openapi-contract) for the edit-and-regen rules.
 
 ### MCP Tools (port 3001)
 

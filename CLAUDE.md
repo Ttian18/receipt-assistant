@@ -89,6 +89,22 @@ The SQLite database is at `/data/receipts.db`. Tables:
    confidence on a result where it missed the date entirely.
    Don't use confidence_score as sole quality gate.
 
+## Schema editing workflow (OpenAPI contract)
+
+The HTTP API contract lives in `src/schemas/` (one zod file per resource: `receipt.ts`, `job.ts`, `summary.ts`, `ask.ts`, `health.ts`, `common.ts`). Routes are registered in `src/openapi.ts`. The generated `openapi/openapi.json` is a build artifact — **never edit it by hand**, it gets overwritten.
+
+When you change a schema or add a new endpoint:
+
+1. Edit the relevant `src/schemas/*.ts` (or add a new file).
+2. Register/update the route in `src/openapi.ts` with method, request, responses.
+3. Add or modify the actual Express handler in `src/server.ts`.
+4. Run `npm run openapi:generate` to regenerate `openapi/openapi.json`.
+5. Commit the schema, route registration, handler, and regenerated spec **in the same commit**. A stale `openapi.json` misleads client codegen and breaks PR diffs.
+
+**Never inline a new `z.object()` directly in `server.ts`.** Schemas defined inline don't appear in the OpenAPI spec, so frontend / macOS / future clients can't see them. The `src/schemas/` + registry layout exists so a single source describes every endpoint.
+
+Pinned to `@asteasolutions/zod-to-openapi` v7 because the repo uses zod v3. v8 requires zod v4 — bump both together in a dedicated PR if/when needed.
+
 ## Image Reading
 
 To read a receipt image, use the Bash tool:
