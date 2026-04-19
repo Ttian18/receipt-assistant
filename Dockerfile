@@ -23,6 +23,7 @@ RUN npm ci
 # Copy sources and build
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY drizzle/ ./drizzle/
 RUN npm run build
 
 # Drop devDependencies so the runtime stage can copy a lean node_modules
@@ -49,6 +50,11 @@ WORKDIR /app
 # Copy compiled output and production node_modules from the builder stage.
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+# Drizzle migrations (SQL files + journal) ship with the image — the
+# migrate runner resolves `<app>/drizzle/` at boot to apply any pending
+# schema changes. Committing these into the image is deliberate: it means
+# the running container and the repo state at build time agree on schema.
+COPY --from=builder /app/drizzle ./drizzle
 COPY package.json CLAUDE.md ./
 COPY docker/entrypoint.sh /app/docker/entrypoint.sh
 
