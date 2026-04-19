@@ -3,12 +3,14 @@ import { FastMCP } from "fastmcp";
 import { z } from "zod";
 import express, { type Request, type Response, type NextFunction } from "express";
 import multer from "multer";
+import swaggerUi from "swagger-ui-express";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import fs from "fs/promises";
 import { askClaude } from "./claude.js";
 import { getReceipt, listReceipts, getSpendingSummary, initSchema } from "./db.js";
 import { submitJob, getJob, subscribeJob } from "./jobs.js";
+import { buildOpenApiDocument } from "./openapi.js";
 
 const PORT = parseInt(process.env.PORT || "3000");
 const MCP_PORT = parseInt(process.env.MCP_PORT || "3001");
@@ -116,6 +118,17 @@ Answer concisely and helpfully.`;
 
 const app = express();
 app.use(express.json());
+
+// API contract — served before auth so /docs is always discoverable.
+// The spec is already public on GitHub; exposing it here is no extra leak.
+const openApiDoc = buildOpenApiDocument();
+app.get("/openapi.json", (_req: Request, res: Response) => {
+  res.json(openApiDoc);
+});
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(openApiDoc, {
+  customSiteTitle: "Receipt Assistant API",
+  swaggerOptions: { persistAuthorization: true },
+}));
 
 // Auth middleware (simple bearer token)
 const AUTH_TOKEN = process.env.AUTH_TOKEN;
@@ -344,6 +357,8 @@ async function main() {
    GET  /summary          — spending summary (?from=&to=)
    POST /ask              — ask a question about spending
    GET  /health           — health check
+   GET  /openapi.json     — OpenAPI 3.1 spec
+   GET  /docs             — interactive Swagger UI
 
 🔌 MCP tools:
    process_receipt, list_receipts, spending_summary,
