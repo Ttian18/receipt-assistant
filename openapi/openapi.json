@@ -1274,6 +1274,654 @@
           "poll"
         ]
       },
+      "ReconcileScope": {
+        "type": "string",
+        "enum": [
+          "batch",
+          "batch_plus_recent_90d"
+        ],
+        "default": "batch"
+      },
+      "ReconcileKind": {
+        "type": "string",
+        "enum": [
+          "dedup",
+          "payment_link",
+          "trip_group",
+          "inventory"
+        ]
+      },
+      "ReconcileRequest": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/ReconcileScope"
+          },
+          "enable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconcileKind"
+            }
+          },
+          "auto_apply_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 0.95
+          }
+        }
+      },
+      "ReconcileBatchStatus": {
+        "type": "string",
+        "enum": [
+          "extracted",
+          "reconciling",
+          "reconciled",
+          "reconcile_error"
+        ]
+      },
+      "ReconcileApplied": {
+        "type": "object",
+        "properties": {
+          "duplicates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "receiptId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+                },
+                "duplicateOf": {
+                  "type": "string",
+                  "format": "uuid",
+                  "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+                }
+              },
+              "required": [
+                "receiptId",
+                "duplicateOf"
+              ]
+            },
+            "default": []
+          },
+          "payment_links": {
+            "type": "array",
+            "items": {},
+            "default": []
+          },
+          "inventory": {
+            "type": "array",
+            "items": {},
+            "default": []
+          },
+          "proposals_total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "proposals_total"
+        ]
+      },
+      "ReconcileProposalStatus": {
+        "type": "string",
+        "enum": [
+          "proposed",
+          "auto_applied",
+          "user_applied",
+          "rejected"
+        ]
+      },
+      "ReconcileProposal": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "batch_id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ReconcileKind"
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReconcileProposalStatus"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "batch_id",
+          "kind",
+          "payload",
+          "score",
+          "status",
+          "created_at",
+          "resolved_at"
+        ]
+      },
+      "ReconcileResult": {
+        "type": "object",
+        "properties": {
+          "batchId": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReconcileBatchStatus"
+          },
+          "applied": {
+            "$ref": "#/components/schemas/ReconcileApplied"
+          },
+          "proposals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconcileProposal"
+            }
+          },
+          "poll": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "batchId",
+          "status",
+          "applied",
+          "proposals"
+        ]
+      },
+      "ApplyRequest": {
+        "type": "object",
+        "properties": {
+          "proposal_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "proposal_ids"
+        ]
+      },
+      "ApplyResult": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "applied",
+          "skipped"
+        ]
+      },
+      "RejectRequest": {
+        "type": "object",
+        "properties": {
+          "proposal_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "minItems": 1
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_ids"
+        ]
+      },
+      "RejectResult": {
+        "type": "object",
+        "properties": {
+          "rejected": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "rejected",
+          "skipped"
+        ]
+      },
+      "SummaryItem": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "total_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "avg_per_txn_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          }
+        },
+        "required": [
+          "key",
+          "count",
+          "total_minor",
+          "avg_per_txn_minor"
+        ]
+      },
+      "SummaryReport": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "category",
+              "account",
+              "payee"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "example": "USD"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SummaryItem"
+            }
+          },
+          "grand_total_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "group_by",
+          "currency",
+          "items",
+          "grand_total_minor"
+        ]
+      },
+      "TrendsItem": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "total_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "total_minor",
+          "count"
+        ]
+      },
+      "TrendsBucket": {
+        "type": "object",
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrendsItem"
+            }
+          },
+          "total_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          }
+        },
+        "required": [
+          "bucket",
+          "items",
+          "total_minor"
+        ]
+      },
+      "TrendsReport": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "month",
+              "year"
+            ]
+          },
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "category",
+              "total"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "example": "USD"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrendsBucket"
+            }
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "period",
+          "group_by",
+          "currency",
+          "buckets"
+        ]
+      },
+      "NetWorthAccount": {
+        "type": "object",
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "asset",
+              "liability",
+              "equity",
+              "income",
+              "expense"
+            ]
+          },
+          "balance_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          }
+        },
+        "required": [
+          "account_id",
+          "name",
+          "type",
+          "balance_minor"
+        ]
+      },
+      "NetWorthReport": {
+        "type": "object",
+        "properties": {
+          "as_of": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "example": "USD"
+          },
+          "assets_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "liabilities_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "equity_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "net_worth_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "by_account": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetWorthAccount"
+            }
+          }
+        },
+        "required": [
+          "as_of",
+          "currency",
+          "assets_minor",
+          "liabilities_minor",
+          "equity_minor",
+          "net_worth_minor",
+          "by_account"
+        ]
+      },
+      "CashflowBucket": {
+        "type": "object",
+        "properties": {
+          "month": {
+            "type": "string"
+          },
+          "income_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "expense_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "net_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          }
+        },
+        "required": [
+          "month",
+          "income_minor",
+          "expense_minor",
+          "net_minor"
+        ]
+      },
+      "CashflowReport": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-04-19"
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "example": "USD"
+          },
+          "income_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "expense_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "net_minor": {
+            "type": "integer",
+            "description": "Signed integer in the currency's minor unit (cents for USD, 1 for JPY, satoshi for BTC). Never store money as float.",
+            "example": 14723
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CashflowBucket"
+            }
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "currency",
+          "income_minor",
+          "expense_minor",
+          "net_minor",
+          "buckets"
+        ]
+      },
       "NewPosting": {
         "type": "object",
         "properties": {
@@ -3510,6 +4158,522 @@
           },
           "404": {
             "description": "Ingest not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/batches/{id}/reconcile": {
+      "post": {
+        "summary": "Run the reconcile pipeline over an extracted batch. Idempotent: a second call on a reconciled batch returns the stored result.",
+        "tags": [
+          "reconcile"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconcileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reconcile completed (or replayed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Batch is already mid-reconcile on another caller; response carries a `poll` URL to fetch the final result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Batch not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Batch is not in a reconcilable state (still extracting, or entered reconcile_error).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileResult"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Fetch the latest reconcile result for a batch.",
+        "tags": [
+          "reconcile"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reconcile snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Batch not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/batches/{id}/reconcile/apply": {
+      "post": {
+        "summary": "Apply one or more reconcile proposals. For dedup proposals this voids the duplicate via the ledger service.",
+        "tags": [
+          "reconcile"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-id apply/skip outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Batch not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/batches/{id}/reconcile/reject": {
+      "post": {
+        "summary": "Reject one or more reconcile proposals. Marks proposals as rejected with no ledger mutation.",
+        "tags": [
+          "reconcile"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-id reject/skip outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RejectResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Batch not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reports/summary": {
+      "get": {
+        "summary": "Spend aggregated by category / account / payee",
+        "tags": [
+          "reports"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "category",
+                "account",
+                "payee"
+              ]
+            },
+            "required": false,
+            "name": "group_by",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$",
+              "example": "USD"
+            },
+            "required": false,
+            "name": "currency",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Summary report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workspace not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reports/trends": {
+      "get": {
+        "summary": "Time-series trend (MoM / YoY) of expense spend",
+        "tags": [
+          "reports"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "month",
+                "year"
+              ]
+            },
+            "required": false,
+            "name": "period",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "category",
+                "total"
+              ]
+            },
+            "required": false,
+            "name": "group_by",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$",
+              "example": "USD"
+            },
+            "required": false,
+            "name": "currency",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trends report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrendsReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workspace not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reports/net_worth": {
+      "get": {
+        "summary": "Assets - liabilities at a point in time",
+        "tags": [
+          "reports"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "as_of",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$",
+              "example": "USD"
+            },
+            "required": false,
+            "name": "currency",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Net worth report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetWorthReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workspace not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reports/cashflow": {
+      "get": {
+        "summary": "Inflows vs outflows over a range, bucketed by month",
+        "tags": [
+          "reports"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-04-19"
+            },
+            "required": false,
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$",
+              "example": "USD"
+            },
+            "required": false,
+            "name": "currency",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cashflow report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashflowReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workspace not found",
             "content": {
               "application/problem+json": {
                 "schema": {

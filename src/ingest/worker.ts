@@ -565,12 +565,12 @@ async function onBatchChildTerminated(
   batchId: string,
   workspaceId: string,
 ): Promise<void> {
-  // If all children of this batch are terminal (done/error/unsupported),
-  // flip the batch to `extracted` and stamp completed_at. Use RETURNING
-  // so we only emit `batch.extracted` when *this* call was the one that
-  // made the transition — concurrent children finishing at the same
-  // moment will race into this code but only one row will update.
-  const updated = await db.execute(
+  // flip the batch to `extracted` and stamp completed_at. RETURNING
+  // tells us whether THIS call effected the transition — concurrent
+  // children finishing at the same moment will race into this code but
+  // only one row will update. Only the winner fires `batch.extracted`
+  // and kicks off auto-reconcile.
+  const res = await db.execute(
     sql`UPDATE batches
          SET status = 'extracted',
              completed_at = NOW()
@@ -582,12 +582,57 @@ async function onBatchChildTerminated(
             WHERE batch_id = ${batchId}::uuid
               AND status NOT IN ('done','error','unsupported')
          )
-       RETURNING id`,
+      RETURNING id, auto_reconcile`,
   );
-  if (updated.rows.length > 0) {
-    const counts = await fetchCountsForEvent(batchId);
-    busEmit("batch.extracted", { batchId, counts });
+  if (res.rows.length === 0) return;
+  const counts = await fetchCountsForEvent(batchId);
+  busEmit("batch.extracted", { batchId, counts });
+  const flipped = res.rows[0] as { auto_reconcile: boolean };
+  if (flipped.auto_reconcile) {
+    await triggerAutoReconcile(batchId, workspaceId);
   }
+}
+
+// ── Auto-reconcile hook (#32 Phase 2a) ───────────────────────────────
+
+/**
+ * Fire-and-forget the reconcile pipeline for a batch that just reached
+ * `extracted`. The extractor path must not block on reconcile — a
+ * reconcile failure leaves the batch in `reconcile_error` but does NOT
+ * revert extraction, per the acceptance criteria in #32 Phase 2a.
+ *
+ * We wire the promise into the worker's `inflight` set so integration
+ * tests can `await drain()` and observe the post-reconcile state
+ * deterministically without sleeping.
+ */
+async function triggerAutoReconcile(
+  batchId: string,
+  workspaceId: string,
+): Promise<void> {
+  // Dynamic import avoids a circular import (engine → transactions.service
+  // → documents/service chains), plus delays work until genuinely needed.
+  const { runReconcile } = await import("../reconcile/engine.js");
+
+  const wsRows = await db
+    .select({ ownerId: workspaces.ownerId })
+    .from(workspaces)
+    .where(eq(workspaces.id, workspaceId));
+  const userId = wsRows[0]?.ownerId;
+  if (!userId) return;
+
+  const p = runReconcile({ workspaceId, userId, batchId })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[ingest worker] auto-reconcile failed for batch ${batchId}:`,
+        err,
+      );
+    })
+    .finally(() => {
+      inflight.delete(p);
+      resolveDrainWaiters();
+    });
+  inflight.add(p);
 }
 
 // ── Startup recovery ──────────────────────────────────────────────────
