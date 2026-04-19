@@ -187,17 +187,20 @@ describe("POST /v1/batches/:id/reconcile — dedup detection + auto-apply", () =
   });
 
   it("is idempotent: a second POST on a reconciled batch returns the stored result", async () => {
-    const { batchId } = await uploadDuplicateBatch({
-      autoReconcile: false,
-      duplicatePrefix: "idem",
-    });
-    // Override the extractor so this prefix also produces duplicates.
+    // Register the extractor BEFORE upload — on fast CI runners the
+    // worker can start processing files as soon as the POST completes,
+    // racing past `setExtractor` and falling back to the unique-per-file
+    // extractor, which produces no duplicates for dedup to find.
     workerApi.setExtractor(
       makeExtractor([
         { prefix: "idem", payee: "IdemShop", occurred_on: "2026-03-03", total_minor: 1200 },
         DEFAULT_DUPLICATE,
       ]),
     );
+    const { batchId } = await uploadDuplicateBatch({
+      autoReconcile: false,
+      duplicatePrefix: "idem",
+    });
     await waitForBatchStatus(batchId, ["extracted"]);
 
     const first = await request(ctx.app)
@@ -222,16 +225,16 @@ describe("POST /v1/batches/:id/reconcile — dedup detection + auto-apply", () =
   });
 
   it("GET /v1/batches/:id/reconcile returns the stored result", async () => {
-    const { batchId } = await uploadDuplicateBatch({
-      autoReconcile: false,
-      duplicatePrefix: "getread",
-    });
     workerApi.setExtractor(
       makeExtractor([
         { prefix: "getread", payee: "ReadBack", occurred_on: "2026-02-14", total_minor: 399 },
         DEFAULT_DUPLICATE,
       ]),
     );
+    const { batchId } = await uploadDuplicateBatch({
+      autoReconcile: false,
+      duplicatePrefix: "getread",
+    });
     await waitForBatchStatus(batchId, ["extracted"]);
 
     // Pre-reconcile GET: batch still extracted, no proposals yet.
