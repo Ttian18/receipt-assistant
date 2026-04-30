@@ -1,0 +1,2 @@
+ALTER TABLE "documents" ADD COLUMN "deleted_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX "documents_workspace_live_idx" ON "documents" USING btree ("workspace_id") WHERE "documents"."deleted_at" IS NULL;

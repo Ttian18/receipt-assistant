@@ -269,15 +269,30 @@ transactionsRouter.patch(
 );
 
 // ── DELETE /v1/transactions/:id ────────────────────────────────────────
+//
+// Default: only `draft` / `error` may be hard-deleted; posted requires
+// POST /void instead (returns 409 must-void-instead).
+// `?hard=true`: caller forces a hard delete on posted/voided as well —
+// rows + postings + document_links cascade. `reconciled` is the one
+// status that still rejects (must unreconcile first).
+
+const TxnDeleteQuery = z.object({
+  hard: z.union([z.literal("true"), z.literal("1"), z.literal("false"), z.literal("0")]).optional(),
+});
 
 transactionsRouter.delete(
   "/:id",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { id } = parseOrThrow(IdParam, req.params);
+      const q = parseOrThrow(TxnDeleteQuery, req.query);
+      const force = q.hard === "true" || q.hard === "1";
       const currentVersion = await loadVersion(req.ctx.workspaceId, id);
       requireIfMatch(req, currentVersion);
-      await deleteTransaction(req.ctx.workspaceId, id, currentVersion);
+      await deleteTransaction(req.ctx.workspaceId, id, currentVersion, {
+        force,
+        userId: req.ctx.userId,
+      });
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -504,15 +519,29 @@ export function registerTransactionsOpenApi(registry: OpenAPIRegistry): void {
   registry.registerPath({
     method: "delete",
     path: "/v1/transactions/{id}",
-    summary: "Delete draft/error transaction",
+    summary: "Delete a transaction",
+    description:
+      "Default: only draft/error transactions may be hard-deleted; posted/voided return 409 (must-void-instead). " +
+      "?hard=true forces a hard delete of any non-reconciled transaction (postings + document_links cascade). " +
+      "Reconciled transactions always reject — unreconcile first.",
     tags: ["transactions"],
     request: {
       params: z.object({ id: Uuid }),
       headers: z.object({ "If-Match": z.string() }),
+      query: z.object({
+        hard: z.enum(["true", "false", "1", "0"]).optional().openapi({
+          description:
+            "Force hard delete of posted/voided transactions. Reconciled is still rejected.",
+        }),
+      }),
     },
     responses: {
       204: { description: "Deleted" },
-      409: { description: "Must void instead", content: problemContent },
+      409: {
+        description:
+          "Must void instead (posted, no ?hard=true), or transaction is reconciled.",
+        content: problemContent,
+      },
     },
   });
 

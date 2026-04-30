@@ -66,6 +66,44 @@
           "issues"
         ]
       },
+      "BuildInfoResponse": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string",
+            "example": "receipt-assistant"
+          },
+          "version": {
+            "type": "string",
+            "example": "1.0.0"
+          },
+          "gitSha": {
+            "type": "string",
+            "example": "a02db01234567890abcdef1234567890abcdef12"
+          },
+          "gitShortSha": {
+            "type": "string",
+            "example": "a02db01"
+          },
+          "gitBranch": {
+            "type": "string",
+            "example": "main"
+          },
+          "builtAt": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-04-27T22:00:35.000Z"
+          }
+        },
+        "required": [
+          "service",
+          "version",
+          "gitSha",
+          "gitShortSha",
+          "gitBranch",
+          "builtAt"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -82,12 +120,16 @@
           "version": {
             "type": "string",
             "example": "1.0.0"
+          },
+          "build": {
+            "$ref": "#/components/schemas/BuildInfoResponse"
           }
         },
         "required": [
           "status",
           "service",
-          "version"
+          "version",
+          "build"
         ]
       },
       "Violation": {
@@ -883,6 +925,13 @@
             "format": "uuid",
             "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
           },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -902,6 +951,7 @@
           "ocr_text",
           "extraction_meta",
           "source_ingest_id",
+          "deleted_at",
           "created_at",
           "updated_at"
         ]
@@ -2268,6 +2318,26 @@
         }
       }
     },
+    "/version": {
+      "get": {
+        "summary": "Build metadata",
+        "tags": [
+          "meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "Deployed build metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildInfoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts": {
       "get": {
         "summary": "List accounts (tree by default, flat with ?flat=true)",
@@ -3127,7 +3197,8 @@
         }
       },
       "delete": {
-        "summary": "Delete draft/error transaction",
+        "summary": "Delete a transaction",
+        "description": "Default: only draft/error transactions may be hard-deleted; posted/voided return 409 (must-void-instead). ?hard=true forces a hard delete of any non-reconciled transaction (postings + document_links cascade). Reconciled transactions always reject — unreconcile first.",
         "tags": [
           "transactions"
         ],
@@ -3144,6 +3215,21 @@
           },
           {
             "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "1",
+                "0"
+              ],
+              "description": "Force hard delete of posted/voided transactions. Reconciled is still rejected."
+            },
+            "required": false,
+            "name": "hard",
+            "in": "query"
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "required": true,
@@ -3156,7 +3242,7 @@
             "description": "Deleted"
           },
           "409": {
-            "description": "Must void instead",
+            "description": "Must void instead (posted, no ?hard=true), or transaction is reconciled.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3675,6 +3761,21 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "1",
+                "0"
+              ],
+              "description": "Include soft-deleted documents in the response. Default false."
+            },
+            "required": false,
+            "name": "include_deleted",
+            "in": "query"
           }
         ],
         "responses": {
@@ -3711,7 +3812,8 @@
         }
       },
       "delete": {
-        "summary": "Hard-delete a document (only if it has no links)",
+        "summary": "Delete a document. Soft-deletes by default; ?hard=true removes the row + file; ?cascade=true also handles linked transactions.",
+        "description": "Default: soft delete (sets deleted_at). ?hard=true: hard delete (row + file); requires no remaining links unless ?cascade=true is also set. ?cascade=true: linked posted transactions are voided, draft/error transactions are hard-deleted, voided transactions are left intact, reconciled transactions abort the operation with 409. ?cascade=true&hard=true: every linked transaction is hard-deleted (postings cascade), the document is hard-deleted, and the image file is removed. Reconciled transactions always block hard cascades — unreconcile first.",
         "tags": [
           "documents"
         ],
@@ -3725,6 +3827,36 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "1",
+                "0"
+              ],
+              "description": "Hard-delete the row and the on-disk image. Default false."
+            },
+            "required": false,
+            "name": "hard",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "1",
+                "0"
+              ],
+              "description": "Also process transactions linked to this document. Combine with hard=true for full purge."
+            },
+            "required": false,
+            "name": "cascade",
+            "in": "query"
           }
         ],
         "responses": {
@@ -3742,7 +3874,7 @@
             }
           },
           "409": {
-            "description": "Document has links — unlink first",
+            "description": "Hard delete refused because document has links (use cascade), or cascade refused because a linked transaction is reconciled.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3886,6 +4018,48 @@
           },
           "404": {
             "description": "Link not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{id}/restore": {
+      "post": {
+        "summary": "Restore a soft-deleted document",
+        "tags": [
+          "documents"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Document not found or not deleted",
             "content": {
               "application/problem+json": {
                 "schema": {

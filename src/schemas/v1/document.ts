@@ -23,6 +23,7 @@ export const Document = z
     ocr_text: z.string().nullable(),
     extraction_meta: z.record(z.string(), z.unknown()).nullable(),
     source_ingest_id: Uuid.nullable(),
+    deleted_at: IsoDateTime.nullable(),
     created_at: IsoDateTime,
     updated_at: IsoDateTime,
   })

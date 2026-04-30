@@ -7,12 +7,18 @@
  *   GET    /v1/documents/:id/content     — binary stream
  *   POST   /v1/documents/:id/links       — link to a transaction
  *   DELETE /v1/documents/:id/links/:txn  — unlink
- *   DELETE /v1/documents/:id             — hard delete (409 if linked)
+ *   DELETE /v1/documents/:id             — soft delete (default), or
+ *                                          ?hard=true (row + file) /
+ *                                          ?cascade=true (also handle
+ *                                          linked txns; combine with
+ *                                          ?hard=true for full purge)
+ *   POST   /v1/documents/:id/restore     — clear deleted_at
  *
  * Idempotency here is intentionally *not* driven by the
  * `Idempotency-Key` header — sha256 of the file bytes is the natural
  * idempotency token. Re-uploading identical bytes returns the existing
- * row with 200 OK, not 201.
+ * row with 200 OK, not 201. Re-uploading bytes whose row is currently
+ * soft-deleted resurrects the row (clears deleted_at).
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
 import multer from "multer";
@@ -36,7 +42,10 @@ import {
   uploadDocumentBytes,
   linkDocumentToTransaction,
   unlinkDocumentFromTransaction,
-  deleteDocument,
+  softDeleteDocument,
+  hardDeleteDocument,
+  restoreDocument,
+  cascadeDeleteDocument,
   extForMime,
   type DocumentKindValue,
 } from "./documents.service.js";
@@ -109,11 +118,25 @@ documentsRouter.post(
 
 // ── GET /v1/documents/:id ──────────────────────────────────────────────
 
+const IncludeDeletedQuery = z.object({
+  include_deleted: z
+    .union([z.literal("true"), z.literal("1"), z.literal("false"), z.literal("0")])
+    .optional(),
+});
+
+function parseIncludeDeleted(q: unknown): boolean {
+  const parsed = IncludeDeletedQuery.safeParse(q);
+  if (!parsed.success) return false;
+  const v = parsed.data.include_deleted;
+  return v === "true" || v === "1";
+}
+
 documentsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const { id } = parseOrThrow(IdOnlyParams, req.params);
-    const doc = await getDocumentById(req.ctx.workspaceId, id);
+    const includeDeleted = parseIncludeDeleted(req.query);
+    const doc = await getDocumentById(req.ctx.workspaceId, id, { includeDeleted });
     if (!doc) throw new NotFoundProblem("Document", id);
 
     if (handleIfNoneMatch(req, res, DOC_VERSION)) return;
@@ -190,17 +213,72 @@ documentsRouter.delete(
 );
 
 // ── DELETE /v1/documents/:id ───────────────────────────────────────────
+//
+// Default: soft delete. Optional flags:
+//   ?hard=true               — actually remove row + image file
+//   ?cascade=true            — also handle linked transactions
+//   ?cascade=true&hard=true  — full purge (txns + links + doc + file)
+
+const DeleteQuery = z.object({
+  hard: z.union([z.literal("true"), z.literal("1"), z.literal("false"), z.literal("0")]).optional(),
+  cascade: z.union([z.literal("true"), z.literal("1"), z.literal("false"), z.literal("0")]).optional(),
+});
+
+function flagTrue(v: string | undefined): boolean {
+  return v === "true" || v === "1";
+}
 
 documentsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const { id } = parseOrThrow(IdOnlyParams, req.params);
-    const removed = await deleteDocument({
+    const q = parseOrThrow(DeleteQuery, req.query);
+    const hard = flagTrue(q.hard);
+    const cascade = flagTrue(q.cascade);
+
+    if (cascade) {
+      await cascadeDeleteDocument({
+        workspaceId: req.ctx.workspaceId,
+        userId: req.ctx.userId,
+        documentId: id,
+        hard,
+      });
+      res.status(204).end();
+      return;
+    }
+
+    if (hard) {
+      const removed = await hardDeleteDocument({
+        workspaceId: req.ctx.workspaceId,
+        documentId: id,
+      });
+      if (!removed) throw new NotFoundProblem("Document", id);
+      res.status(204).end();
+      return;
+    }
+
+    const ok = await softDeleteDocument({
       workspaceId: req.ctx.workspaceId,
       documentId: id,
     });
-    if (!removed) throw new NotFoundProblem("Document", id);
+    if (!ok) throw new NotFoundProblem("Document", id);
     res.status(204).end();
+  }),
+);
+
+// ── POST /v1/documents/:id/restore ─────────────────────────────────────
+
+documentsRouter.post(
+  "/:id/restore",
+  asyncHandler(async (req, res) => {
+    const { id } = parseOrThrow(IdOnlyParams, req.params);
+    const doc = await restoreDocument({
+      workspaceId: req.ctx.workspaceId,
+      documentId: id,
+    });
+    if (!doc) throw new NotFoundProblem("Document", id);
+    setEtag(res, DOC_VERSION);
+    res.json(doc);
   }),
 );
 
@@ -254,7 +332,18 @@ export function registerDocumentsOpenApi(registry: OpenAPIRegistry): void {
     path: "/v1/documents/{id}",
     summary: "Get document metadata",
     tags: ["documents"],
-    request: { params: z.object({ id: Uuid }) },
+    request: {
+      params: z.object({ id: Uuid }),
+      query: z.object({
+        include_deleted: z
+          .enum(["true", "false", "1", "0"])
+          .optional()
+          .openapi({
+            description:
+              "Include soft-deleted documents in the response. Default false.",
+          }),
+      }),
+    },
     responses: {
       200: {
         description: "Document",
@@ -324,14 +413,51 @@ export function registerDocumentsOpenApi(registry: OpenAPIRegistry): void {
   registry.registerPath({
     method: "delete",
     path: "/v1/documents/{id}",
-    summary: "Hard-delete a document (only if it has no links)",
+    summary:
+      "Delete a document. Soft-deletes by default; ?hard=true removes the row + file; ?cascade=true also handles linked transactions.",
+    description:
+      "Default: soft delete (sets deleted_at). " +
+      "?hard=true: hard delete (row + file); requires no remaining links unless ?cascade=true is also set. " +
+      "?cascade=true: linked posted transactions are voided, draft/error transactions are hard-deleted, voided transactions are left intact, reconciled transactions abort the operation with 409. " +
+      "?cascade=true&hard=true: every linked transaction is hard-deleted (postings cascade), the document is hard-deleted, and the image file is removed. " +
+      "Reconciled transactions always block hard cascades — unreconcile first.",
     tags: ["documents"],
-    request: { params: z.object({ id: Uuid }) },
+    request: {
+      params: z.object({ id: Uuid }),
+      query: z.object({
+        hard: z.enum(["true", "false", "1", "0"]).optional().openapi({
+          description: "Hard-delete the row and the on-disk image. Default false.",
+        }),
+        cascade: z.enum(["true", "false", "1", "0"]).optional().openapi({
+          description:
+            "Also process transactions linked to this document. Combine with hard=true for full purge.",
+        }),
+      }),
+    },
     responses: {
       204: { description: "Deleted" },
       404: { description: "Not found", content: problemContent },
       409: {
-        description: "Document has links — unlink first",
+        description:
+          "Hard delete refused because document has links (use cascade), or cascade refused because a linked transaction is reconciled.",
+        content: problemContent,
+      },
+    },
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/v1/documents/{id}/restore",
+    summary: "Restore a soft-deleted document",
+    tags: ["documents"],
+    request: { params: z.object({ id: Uuid }) },
+    responses: {
+      200: {
+        description: "Restored",
+        content: { "application/json": { schema: Document } },
+      },
+      404: {
+        description: "Document not found or not deleted",
         content: problemContent,
       },
     },

@@ -10,15 +10,16 @@
  * and the HTTP `POST /v1/documents` provably equivalent.
  */
 import { createHash } from "crypto";
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, writeFile, unlink } from "fs/promises";
 import * as path from "path";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, isNull } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { documents, documentLinks } from "../schema/documents.js";
-import { transactions } from "../schema/transactions.js";
+import { transactions, postings, transactionEvents } from "../schema/index.js";
 import { newId } from "../http/uuid.js";
 import {
   DocumentHasLinksProblem,
+  HttpProblem,
   NotFoundProblem,
 } from "../http/problem.js";
 
@@ -39,6 +40,7 @@ export interface DocumentRow {
   ocr_text: string | null;
   extraction_meta: Record<string, unknown> | null;
   source_ingest_id: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +95,7 @@ function rowToApi(r: {
   ocrText: string | null;
   extractionMeta: unknown;
   sourceIngestId: string | null;
+  deletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }): DocumentRow {
@@ -109,6 +112,7 @@ function rowToApi(r: {
         ? null
         : (r.extractionMeta as Record<string, unknown>),
     source_ingest_id: r.sourceIngestId,
+    deleted_at: r.deletedAt ? r.deletedAt.toISOString() : null,
     created_at: r.createdAt.toISOString(),
     updated_at: r.updatedAt.toISOString(),
   };
@@ -119,6 +123,11 @@ function rowToApi(r: {
  * in the workspace, return it verbatim — no new disk write, no new DB
  * row. This is the documented contract (sha256 is the dedup key per
  * issue #28 header table).
+ *
+ * If the existing row is soft-deleted, re-uploading the same bytes
+ * resurrects it (clears `deleted_at`). This is the cheapest restore
+ * path — `POST /:id/restore` is the explicit version, but a re-upload
+ * is the natural undo when the user still has the file in hand.
  */
 export async function uploadDocumentBytes(params: {
   workspaceId: string;
@@ -129,13 +138,23 @@ export async function uploadDocumentBytes(params: {
   const { workspaceId, bytes, mimeType, kind } = params;
   const sha = sha256Hex(bytes);
 
-  // Dedup-lookup first. Unique index is (workspace_id, sha256).
+  // Dedup-lookup first. Unique index is (workspace_id, sha256) and
+  // intentionally spans soft-deleted rows so re-upload resurrects.
   const existing = await db
     .select()
     .from(documents)
     .where(and(eq(documents.workspaceId, workspaceId), eq(documents.sha256, sha)));
   if (existing.length > 0) {
-    return { doc: rowToApi(existing[0]!), created: false };
+    const row = existing[0]!;
+    if (row.deletedAt) {
+      const restored = await db
+        .update(documents)
+        .set({ deletedAt: null })
+        .where(eq(documents.id, row.id))
+        .returning();
+      return { doc: rowToApi(restored[0]!), created: false };
+    }
+    return { doc: rowToApi(row), created: false };
   }
 
   // Persist bytes under UPLOAD_DIR/<sha>.<ext>.
@@ -168,11 +187,14 @@ export async function uploadDocumentBytes(params: {
 export async function getDocumentById(
   workspaceId: string,
   id: string,
+  opts: { includeDeleted?: boolean } = {},
 ): Promise<DocumentRow | null> {
+  const conds = [eq(documents.id, id), eq(documents.workspaceId, workspaceId)];
+  if (!opts.includeDeleted) conds.push(isNull(documents.deletedAt));
   const rows = await db
     .select()
     .from(documents)
-    .where(and(eq(documents.id, id), eq(documents.workspaceId, workspaceId)));
+    .where(and(...conds));
   return rows.length > 0 ? rowToApi(rows[0]!) : null;
 }
 
@@ -185,10 +207,17 @@ export async function linkDocumentToTransaction(params: {
 
   // Both must belong to the caller's workspace. Validate explicitly
   // rather than rely on FK violations — clearer error payload.
+  // Soft-deleted documents cannot be linked.
   const doc = await db
     .select({ id: documents.id })
     .from(documents)
-    .where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));
+    .where(
+      and(
+        eq(documents.id, documentId),
+        eq(documents.workspaceId, workspaceId),
+        isNull(documents.deletedAt),
+      ),
+    );
   if (doc.length === 0) throw new NotFoundProblem("Document", documentId);
 
   const tx = await db
@@ -236,28 +265,360 @@ export async function unlinkDocumentFromTransaction(params: {
   return true;
 }
 
-export async function deleteDocument(params: {
+/**
+ * Soft delete: mark `deleted_at = NOW()`. Idempotent (already-deleted
+ * rows are returned as `false` so the route emits 404). Links survive
+ * — they record a historical association even if the doc is hidden.
+ */
+export async function softDeleteDocument(params: {
   workspaceId: string;
   documentId: string;
 }): Promise<boolean> {
   const { workspaceId, documentId } = params;
-
-  const doc = await db
-    .select({ id: documents.id })
+  const rows = await db
+    .select({ id: documents.id, deletedAt: documents.deletedAt })
     .from(documents)
     .where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));
-  if (doc.length === 0) return false;
+  if (rows.length === 0) return false;
+  if (rows[0]!.deletedAt) return false; // already deleted → 404 to caller
 
-  // Refuse to delete while links exist — caller must unlink first.
+  await db
+    .update(documents)
+    .set({ deletedAt: new Date() })
+    .where(eq(documents.id, documentId));
+  return true;
+}
+
+/**
+ * Restore a soft-deleted document: clear `deleted_at`. Returns false
+ * if the doc isn't found or wasn't deleted (caller maps to 404).
+ */
+export async function restoreDocument(params: {
+  workspaceId: string;
+  documentId: string;
+}): Promise<DocumentRow | null> {
+  const { workspaceId, documentId } = params;
+  const rows = await db
+    .select()
+    .from(documents)
+    .where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));
+  if (rows.length === 0) return null;
+  if (!rows[0]!.deletedAt) return null;
+
+  const restored = await db
+    .update(documents)
+    .set({ deletedAt: null })
+    .where(eq(documents.id, documentId))
+    .returning();
+  return rowToApi(restored[0]!);
+}
+
+/**
+ * Hard delete: row + on-disk bytes. By default refuses if links exist
+ * (caller is expected to call cascade or unlink first). The image
+ * file is removed AFTER the DB commit so a rollback doesn't leave a
+ * deleted-on-disk-but-present-in-db state. The reverse risk (file
+ * gone, row missed) is acceptable because the bytes are reproducible
+ * from the user's source.
+ */
+export async function hardDeleteDocument(params: {
+  workspaceId: string;
+  documentId: string;
+}): Promise<boolean> {
+  const { workspaceId, documentId } = params;
+  const rows = await db
+    .select({ id: documents.id, filePath: documents.filePath })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));
+  if (rows.length === 0) return false;
+  const filePath = rows[0]!.filePath;
+
   const linkCountRes = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(documentLinks)
     .where(eq(documentLinks.documentId, documentId));
   const linkCount = linkCountRes[0]?.n ?? 0;
-  if (linkCount > 0) {
-    throw new DocumentHasLinksProblem(documentId, linkCount);
-  }
+  if (linkCount > 0) throw new DocumentHasLinksProblem(documentId, linkCount);
 
   await db.delete(documents).where(eq(documents.id, documentId));
+
+  if (filePath) {
+    try {
+      await unlink(filePath);
+    } catch {
+      // File missing or permission issue — log nothing and move on;
+      // the row is gone, which is the source-of-truth state.
+    }
+  }
   return true;
+}
+
+interface CascadeReport {
+  unlinked: number;
+  txns_voided: string[];
+  txns_hard_deleted: string[];
+  txns_skipped_voided: string[];
+}
+
+/**
+ * One-call "delete this whole receipt" orchestration.
+ *
+ * Soft mode (default): linked posted txns → voided; linked draft/error
+ * txns → hard-deleted (no audit value); linked already-voided txns →
+ * left alone, link kept for history; document → soft-deleted.
+ *
+ * Hard mode (`hard=true`): all linked txns are hard-deleted (postings
+ * cascade via FK; void mirrors are NOT chased — orphan mirrors become
+ * the user's problem, matching "user takes responsibility"); document
+ * → hard-deleted (row + image file).
+ *
+ * Both modes refuse if any linked txn is `reconciled`: 409, no writes.
+ * Caller must unreconcile first.
+ *
+ * Everything happens in a single DB transaction — the file unlink
+ * (hard mode) runs after commit.
+ */
+export async function cascadeDeleteDocument(params: {
+  workspaceId: string;
+  userId: string;
+  documentId: string;
+  hard: boolean;
+}): Promise<CascadeReport & { hardDeletedFilePath?: string | null }> {
+  const { workspaceId, userId, documentId, hard } = params;
+
+  let pendingFileUnlink: string | null = null;
+
+  const report = await db.transaction(async (tx) => {
+    // Load doc (allow soft-deleted — user may want to fully purge a
+    // soft-deleted row + its surviving links via cascade hard).
+    const docRows = await tx
+      .select()
+      .from(documents)
+      .where(
+        and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)),
+      );
+    if (docRows.length === 0) throw new NotFoundProblem("Document", documentId);
+    const doc = docRows[0]!;
+
+    // Find all linked transactions with their current state.
+    const linkedTxns = await tx
+      .select({
+        id: transactions.id,
+        status: transactions.status,
+        voidedById: transactions.voidedById,
+        version: transactions.version,
+      })
+      .from(documentLinks)
+      .innerJoin(transactions, eq(transactions.id, documentLinks.transactionId))
+      .where(eq(documentLinks.documentId, documentId));
+
+    // Reconciled guard — refuse the whole batch.
+    const reconciled = linkedTxns.filter((t) => t.status === "reconciled");
+    if (reconciled.length > 0) {
+      throw new HttpProblem(
+        409,
+        "cascade-blocked-reconciled",
+        "Cannot cascade-delete: linked transaction is reconciled",
+        `Document ${documentId} is linked to ${reconciled.length} reconciled transaction(s). Unreconcile first, then retry.`,
+        { document_id: documentId, reconciled_transaction_ids: reconciled.map((r) => r.id) },
+      );
+    }
+
+    const txnsVoided: string[] = [];
+    const txnsHardDeleted: string[] = [];
+    const txnsSkipped: string[] = [];
+
+    if (hard) {
+      // Unlink first (FK cascade would also do it, but being explicit
+      // makes the audit trail readable: the unlinks happen, then the
+      // txns vanish).
+      const linkCount = linkedTxns.length;
+      if (linkCount > 0) {
+        await tx
+          .delete(documentLinks)
+          .where(eq(documentLinks.documentId, documentId));
+      }
+      // Hard delete all linked txns. Postings + remaining links cascade.
+      for (const t of linkedTxns) {
+        await tx.insert(transactionEvents).values({
+          id: newId(),
+          workspaceId,
+          transactionId: t.id,
+          eventType: "hard_deleted",
+          actorId: userId,
+          payload: {
+            reason: "cascade_delete_document",
+            document_id: documentId,
+            prior_status: t.status,
+          },
+        });
+        await tx.delete(transactions).where(eq(transactions.id, t.id));
+        txnsHardDeleted.push(t.id);
+      }
+      // Hard delete the doc.
+      await tx.delete(documents).where(eq(documents.id, documentId));
+      pendingFileUnlink = doc.filePath;
+
+      return {
+        unlinked: linkCount,
+        txns_voided: txnsVoided,
+        txns_hard_deleted: txnsHardDeleted,
+        txns_skipped_voided: txnsSkipped,
+      };
+    }
+
+    // Soft mode.
+    for (const t of linkedTxns) {
+      if (t.status === "draft" || t.status === "error") {
+        await tx.insert(transactionEvents).values({
+          id: newId(),
+          workspaceId,
+          transactionId: t.id,
+          eventType: "hard_deleted",
+          actorId: userId,
+          payload: {
+            reason: "cascade_soft_delete_document",
+            document_id: documentId,
+            prior_status: t.status,
+          },
+        });
+        await tx.delete(transactions).where(eq(transactions.id, t.id));
+        txnsHardDeleted.push(t.id);
+      } else if (t.status === "posted") {
+        await voidTransactionInTx(tx, {
+          workspaceId,
+          userId,
+          txId: t.id,
+          expectedVersion: Number(t.version),
+          reason: `cascade_soft_delete_document:${documentId}`,
+        });
+        txnsVoided.push(t.id);
+      } else if (t.status === "voided") {
+        // Leave alone. Link survives as historical record.
+        txnsSkipped.push(t.id);
+      }
+      // 'reconciled' already short-circuited above.
+    }
+
+    // Soft-delete the doc itself (idempotent).
+    if (!doc.deletedAt) {
+      await tx
+        .update(documents)
+        .set({ deletedAt: new Date() })
+        .where(eq(documents.id, documentId));
+    }
+
+    return {
+      unlinked: 0,
+      txns_voided: txnsVoided,
+      txns_hard_deleted: txnsHardDeleted,
+      txns_skipped_voided: txnsSkipped,
+    };
+  });
+
+  if (pendingFileUnlink) {
+    try {
+      await unlink(pendingFileUnlink);
+    } catch {
+      // best-effort
+    }
+  }
+
+  return { ...report, hardDeletedFilePath: pendingFileUnlink };
+}
+
+// Internal: void a transaction inside an existing tx scope. Mirrors
+// `voidTransaction` in transactions.service.ts but without spinning a
+// new outer transaction, so cascades remain atomic. Kept private to
+// avoid drift — the public path stays voidTransaction.
+async function voidTransactionInTx(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  args: {
+    workspaceId: string;
+    userId: string;
+    txId: string;
+    expectedVersion: number;
+    reason: string;
+  },
+): Promise<void> {
+  const { workspaceId, userId, txId, expectedVersion, reason } = args;
+  const rows = await tx
+    .select()
+    .from(transactions)
+    .where(
+      and(eq(transactions.id, txId), eq(transactions.workspaceId, workspaceId)),
+    );
+  if (rows.length === 0) throw new NotFoundProblem("Transaction", txId);
+  const current = rows[0]!;
+  if (Number(current.version) !== expectedVersion) {
+    const { VersionMismatchProblem } = await import("../http/problem.js");
+    throw new VersionMismatchProblem(Number(current.version), expectedVersion);
+  }
+
+  const originalPostings = await tx
+    .select()
+    .from(postings)
+    .where(eq(postings.transactionId, txId));
+
+  const mirrorId = newId();
+  const existingMeta = (current.metadata ?? {}) as Record<string, unknown>;
+  const mirrorMeta: Record<string, unknown> = {
+    ...existingMeta,
+    voided: txId,
+    void_reason: reason,
+  };
+
+  await tx.insert(transactions).values({
+    id: mirrorId,
+    workspaceId,
+    occurredOn: typeof current.occurredOn === "string"
+      ? current.occurredOn
+      : (current.occurredOn as Date).toISOString().slice(0, 10),
+    occurredAt: current.occurredAt,
+    payee: `VOID: ${current.payee ?? ""}`.trim(),
+    narration: current.narration,
+    status: "posted",
+    tripId: current.tripId,
+    metadata: mirrorMeta,
+    createdBy: userId,
+  });
+
+  await tx.insert(postings).values(
+    originalPostings.map((p) => ({
+      id: newId(),
+      workspaceId,
+      transactionId: mirrorId,
+      accountId: p.accountId,
+      amountMinor: -BigInt(p.amountMinor),
+      currency: p.currency,
+      fxRate: p.fxRate,
+      amountBaseMinor:
+        p.amountBaseMinor === null ? null : -BigInt(p.amountBaseMinor),
+      memo: p.memo,
+    })),
+  );
+
+  await tx
+    .update(transactions)
+    .set({ status: "voided", voidedById: mirrorId })
+    .where(eq(transactions.id, txId));
+
+  await tx.insert(transactionEvents).values([
+    {
+      id: newId(),
+      workspaceId,
+      transactionId: txId,
+      eventType: "voided",
+      actorId: userId,
+      payload: { voided_by: mirrorId, reason },
+    },
+    {
+      id: newId(),
+      workspaceId,
+      transactionId: mirrorId,
+      eventType: "created",
+      actorId: userId,
+      payload: { voids: txId, reason },
+    },
+  ]);
 }

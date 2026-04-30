@@ -7,8 +7,12 @@
  *   3. GET /content streams the bytes with Content-Type
  *   4. POST /links + idempotent replay
  *   5. DELETE /links + 404 on re-delete
- *   6. DELETE /documents with no links
- *   7. DELETE /documents with a link → 409 document-has-links
+ *   6. DELETE /documents soft delete (default) + 404 on re-delete +
+ *      restore + re-upload-resurrects
+ *   7. DELETE /documents?hard=true unlinked → 204; linked → 409
+ *   8. DELETE /documents?cascade=true (soft) → posted txn voided
+ *   9. DELETE /documents?cascade=true&hard=true → txn rows gone, file gone
+ *  10. Cascade refuses if any linked txn is reconciled (409, no writes)
  *
  * Note on test isolation: this suite builds its own minimal Express app
  * with only the documents router mounted, rather than calling the
@@ -376,9 +380,9 @@ describe("DELETE /v1/documents/:id/links/:txn_id", () => {
   });
 });
 
-describe("DELETE /v1/documents/:id", () => {
-  it("204s when the doc has no links; 404 on re-delete", async () => {
-    const bytes = makeBytes("delete-clean");
+describe("DELETE /v1/documents/:id — soft delete (default)", () => {
+  it("soft-deletes a doc (no links); 404 on re-delete; visible via include_deleted; restore brings it back", async () => {
+    const bytes = makeBytes("soft-delete-clean");
     const created = await request(ctx.app)
       .post("/v1/documents")
       .attach("file", bytes, { filename: "d.jpg", contentType: "image/jpeg" });
@@ -387,13 +391,35 @@ describe("DELETE /v1/documents/:id", () => {
     const first = await request(ctx.app).delete(`/v1/documents/${docId}`);
     expect(first.status).toBe(204);
 
+    // Default GET hides soft-deleted.
+    const hidden = await request(ctx.app).get(`/v1/documents/${docId}`);
+    expect(hidden.status).toBe(404);
+
+    // include_deleted surfaces it with deleted_at populated.
+    const surfaced = await request(ctx.app).get(
+      `/v1/documents/${docId}?include_deleted=true`,
+    );
+    expect(surfaced.status).toBe(200);
+    expect(typeof surfaced.body.deleted_at).toBe("string");
+
+    // Re-delete is 404 (already deleted).
     const second = await request(ctx.app).delete(`/v1/documents/${docId}`);
     expect(second.status).toBe(404);
+
+    // Restore.
+    const restored = await request(ctx.app).post(
+      `/v1/documents/${docId}/restore`,
+    );
+    expect(restored.status).toBe(200);
+    expect(restored.body.deleted_at).toBeNull();
+
+    const live = await request(ctx.app).get(`/v1/documents/${docId}`);
+    expect(live.status).toBe(200);
   });
 
-  it("409s with errors/document-has-links when a link exists", async () => {
+  it("soft-delete works even with links (links survive as historical record)", async () => {
     const txId = await seedTransaction();
-    const bytes = makeBytes("delete-linked");
+    const bytes = makeBytes("soft-delete-linked");
     const created = await request(ctx.app)
       .post("/v1/documents")
       .attach("file", bytes, { filename: "dl.jpg", contentType: "image/jpeg" });
@@ -405,12 +431,188 @@ describe("DELETE /v1/documents/:id", () => {
       .expect(204);
 
     const res = await request(ctx.app).delete(`/v1/documents/${docId}`);
-    expect(res.status).toBe(409);
-    expect(res.headers["content-type"]).toContain(
-      "application/problem+json",
+    expect(res.status).toBe(204);
+
+    // Link row is still there.
+    const linkRows = await ctx.db.execute(
+      sql`SELECT 1 FROM document_links WHERE document_id = ${docId}::uuid AND transaction_id = ${txId}::uuid`,
     );
+    expect((linkRows as any).rows.length).toBe(1);
+  });
+
+  it("re-uploading the same bytes resurrects a soft-deleted doc", async () => {
+    const bytes = makeBytes("resurrect-via-reupload");
+    const first = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "rr.jpg", contentType: "image/jpeg" });
+    const docId = first.body.id;
+    expect(first.status).toBe(201);
+
+    await request(ctx.app).delete(`/v1/documents/${docId}`).expect(204);
+
+    const replay = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "rr.jpg", contentType: "image/jpeg" });
+    expect(replay.status).toBe(200); // dedup hit, not 201
+    expect(replay.body.id).toBe(docId);
+    expect(replay.body.deleted_at).toBeNull();
+  });
+});
+
+describe("DELETE /v1/documents/:id?hard=true", () => {
+  it("hard-deletes when no links exist", async () => {
+    const bytes = makeBytes("hard-clean");
+    const created = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "h.jpg", contentType: "image/jpeg" });
+    const docId = created.body.id;
+
+    const res = await request(ctx.app).delete(
+      `/v1/documents/${docId}?hard=true`,
+    );
+    expect(res.status).toBe(204);
+
+    // Row really gone — even include_deleted can't find it.
+    const after = await request(ctx.app).get(
+      `/v1/documents/${docId}?include_deleted=true`,
+    );
+    expect(after.status).toBe(404);
+  });
+
+  it("409s when a link exists (caller must use ?cascade=true)", async () => {
+    const txId = await seedTransaction();
+    const bytes = makeBytes("hard-linked");
+    const created = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "hl.jpg", contentType: "image/jpeg" });
+    const docId = created.body.id;
+
+    await request(ctx.app)
+      .post(`/v1/documents/${docId}/links`)
+      .send({ transaction_id: txId })
+      .expect(204);
+
+    const res = await request(ctx.app).delete(
+      `/v1/documents/${docId}?hard=true`,
+    );
+    expect(res.status).toBe(409);
     expect(res.body.type).toContain("errors/document-has-links");
     expect(res.body.document_id).toBe(docId);
     expect(res.body.link_count).toBe(1);
+  });
+});
+
+describe("DELETE /v1/documents/:id?cascade=true — soft cascade", () => {
+  it("voids the linked posted transaction and soft-deletes the doc", async () => {
+    const txId = await seedTransaction();
+    const bytes = makeBytes("cascade-soft");
+    const created = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "cs.jpg", contentType: "image/jpeg" });
+    const docId = created.body.id;
+
+    await request(ctx.app)
+      .post(`/v1/documents/${docId}/links`)
+      .send({ transaction_id: txId })
+      .expect(204);
+
+    const res = await request(ctx.app).delete(
+      `/v1/documents/${docId}?cascade=true`,
+    );
+    expect(res.status).toBe(204);
+
+    // Original txn is now voided, with a mirror.
+    const txnRows = await ctx.db.execute(
+      sql`SELECT status, voided_by_id FROM transactions WHERE id = ${txId}::uuid`,
+    );
+    expect((txnRows as any).rows[0].status).toBe("voided");
+    expect((txnRows as any).rows[0].voided_by_id).not.toBeNull();
+
+    // Doc is soft-deleted.
+    const after = await request(ctx.app).get(
+      `/v1/documents/${docId}?include_deleted=true`,
+    );
+    expect(after.status).toBe(200);
+    expect(typeof after.body.deleted_at).toBe("string");
+  });
+});
+
+describe("DELETE /v1/documents/:id?cascade=true&hard=true — full purge", () => {
+  it("hard-deletes the linked txn and the doc", async () => {
+    const txId = await seedTransaction();
+    const bytes = makeBytes("cascade-hard");
+    const created = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "ch.jpg", contentType: "image/jpeg" });
+    const docId = created.body.id;
+
+    await request(ctx.app)
+      .post(`/v1/documents/${docId}/links`)
+      .send({ transaction_id: txId })
+      .expect(204);
+
+    const res = await request(ctx.app).delete(
+      `/v1/documents/${docId}?cascade=true&hard=true`,
+    );
+    expect(res.status).toBe(204);
+
+    // Txn is gone.
+    const txnRows = await ctx.db.execute(
+      sql`SELECT 1 FROM transactions WHERE id = ${txId}::uuid`,
+    );
+    expect((txnRows as any).rows.length).toBe(0);
+
+    // Postings cascaded.
+    const postRows = await ctx.db.execute(
+      sql`SELECT 1 FROM postings WHERE transaction_id = ${txId}::uuid`,
+    );
+    expect((postRows as any).rows.length).toBe(0);
+
+    // Doc row is gone.
+    const after = await request(ctx.app).get(
+      `/v1/documents/${docId}?include_deleted=true`,
+    );
+    expect(after.status).toBe(404);
+  });
+
+  it("refuses when a linked transaction is reconciled (no writes)", async () => {
+    const txId = await seedTransaction();
+    // Mark reconciled directly via DB — the API path requires
+    // /v1/transactions which isn't mounted in this test app.
+    await ctx.db.execute(
+      sql`UPDATE transactions SET status = 'reconciled' WHERE id = ${txId}::uuid`,
+    );
+
+    const bytes = makeBytes("cascade-blocked");
+    const created = await request(ctx.app)
+      .post("/v1/documents")
+      .attach("file", bytes, { filename: "cb.jpg", contentType: "image/jpeg" });
+    const docId = created.body.id;
+
+    await request(ctx.app)
+      .post(`/v1/documents/${docId}/links`)
+      .send({ transaction_id: txId })
+      .expect(204);
+
+    const res = await request(ctx.app).delete(
+      `/v1/documents/${docId}?cascade=true&hard=true`,
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.type).toContain("errors/cascade-blocked-reconciled");
+
+    // Doc untouched, txn untouched, link intact.
+    const docAfter = await request(ctx.app).get(`/v1/documents/${docId}`);
+    expect(docAfter.status).toBe(200);
+    expect(docAfter.body.deleted_at).toBeNull();
+
+    const txnRows = await ctx.db.execute(
+      sql`SELECT status FROM transactions WHERE id = ${txId}::uuid`,
+    );
+    expect((txnRows as any).rows[0].status).toBe("reconciled");
+
+    const linkRows = await ctx.db.execute(
+      sql`SELECT 1 FROM document_links WHERE document_id = ${docId}::uuid`,
+    );
+    expect((linkRows as any).rows.length).toBe(1);
   });
 });

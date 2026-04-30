@@ -29,6 +29,13 @@
       "when": 1776726080523,
       "tag": "0003_foamy_lady_mastermind",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1777512323003,
+      "tag": "0004_magenta_aaron_stack",
+      "breakpoints": true
     }
   ]
 }

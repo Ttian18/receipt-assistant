@@ -621,6 +621,7 @@ export async function deleteTransaction(
   workspaceId: string,
   id: string,
   expectedVersion: number,
+  opts: { force?: boolean; userId?: string } = {},
 ): Promise<void> {
   await db.transaction(async (tx) => {
     const rows = await tx
@@ -635,8 +636,30 @@ export async function deleteTransaction(
       const { VersionMismatchProblem } = await import("../http/problem.js");
       throw new VersionMismatchProblem(Number(current.version), expectedVersion);
     }
-    if (current.status !== "draft" && current.status !== "error") {
+    // Reconciled is the one status the force flag still won't override
+    // — bank-matched rows must be unreconciled first so the user makes
+    // the deliberate choice.
+    if (current.status === "reconciled") {
+      throw new HttpProblem(
+        409,
+        "cannot-delete-reconciled",
+        "Cannot delete reconciled transaction",
+        `Transaction ${id} is reconciled. Unreconcile it first, then DELETE.`,
+        { transaction_id: id, status: current.status },
+      );
+    }
+    if (!opts.force && current.status !== "draft" && current.status !== "error") {
       throw new MustVoidInsteadProblem(id, current.status);
+    }
+    if (opts.force) {
+      await tx.insert(transactionEvents).values({
+        id: newId(),
+        workspaceId,
+        transactionId: id,
+        eventType: "hard_deleted",
+        actorId: opts.userId ?? null,
+        payload: { reason: "force_delete", prior_status: current.status },
+      });
     }
     // Hard-delete: postings + document_links cascade via FK.
     await tx.delete(transactions).where(eq(transactions.id, id));

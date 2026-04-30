@@ -3,11 +3,13 @@ import {
   uuid,
   text,
   jsonb,
+  timestamp,
   uniqueIndex,
   index,
   primaryKey,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createdAt, updatedAt } from "./common.js";
 import { documentKindEnum } from "./enums.js";
 import { workspaces } from "./workspaces.js";
@@ -31,15 +33,24 @@ export const documents = pgTable(
       (): AnyPgColumn => ingests.id,
       { onDelete: "set null" },
     ),
+    // Soft-delete tombstone. NULL = visible. Set to NOW() by
+    // `DELETE /v1/documents/:id` (default soft delete). Hard delete
+    // (`?hard=true`) removes the row outright. Re-uploading the same
+    // bytes resurrects a soft-deleted row by clearing this column.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt,
     updatedAt,
   },
   (t) => [
-    // Content dedupe per workspace. Globally unique sha256 would break
-    // multi-tenant isolation (workspace A can't see B's upload).
+    // Content dedupe per workspace. Spans soft-deleted rows on purpose:
+    // re-uploading identical bytes hits the same row and resurrects it.
     uniqueIndex("documents_workspace_sha_uniq").on(t.workspaceId, t.sha256),
     index("documents_kind_idx").on(t.workspaceId, t.kind),
     index("documents_source_ingest_idx").on(t.sourceIngestId),
+    // Partial index for the hot path: list/get default to live rows.
+    index("documents_workspace_live_idx")
+      .on(t.workspaceId)
+      .where(sql`${t.deletedAt} IS NULL`),
   ],
 );
 
