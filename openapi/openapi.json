@@ -1938,6 +1938,341 @@
           "retired_at"
         ]
       },
+      "BrandRollupStats": {
+        "type": "object",
+        "properties": {
+          "location_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "transaction_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lifetime_spend_minor": {
+            "type": "integer"
+          },
+          "current_month_spend_minor": {
+            "type": "integer"
+          },
+          "last_transaction_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location_count",
+          "transaction_count",
+          "lifetime_spend_minor",
+          "current_month_spend_minor",
+          "last_transaction_date",
+          "currency"
+        ]
+      },
+      "Merchant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "brand_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "canonical_name": {
+            "type": "string"
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "place_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "photo_attribution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lat": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "lng": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "enrichment_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "success",
+              "not_found",
+              "failed"
+            ]
+          },
+          "enrichment_attempted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "custom_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "brand_id",
+          "canonical_name",
+          "category",
+          "place_id",
+          "photo_url",
+          "photo_attribution",
+          "address",
+          "lat",
+          "lng",
+          "enrichment_status",
+          "enrichment_attempted_at",
+          "custom_name",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "MerchantStats": {
+        "type": "object",
+        "properties": {
+          "transaction_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lifetime_spend_minor": {
+            "type": "integer"
+          },
+          "current_month_spend_minor": {
+            "type": "integer"
+          },
+          "last_transaction_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_count",
+          "lifetime_spend_minor",
+          "current_month_spend_minor",
+          "last_transaction_date",
+          "currency"
+        ]
+      },
+      "BrandRollupLocation": {
+        "type": "object",
+        "properties": {
+          "merchant": {
+            "$ref": "#/components/schemas/Merchant"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/MerchantStats"
+          }
+        },
+        "required": [
+          "merchant",
+          "stats"
+        ]
+      },
+      "BrandRollupRecentRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "occurred_on": {
+            "type": "string"
+          },
+          "payee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "posted",
+              "voided",
+              "reconciled",
+              "error"
+            ]
+          },
+          "total_minor": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "document_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "merchant_id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
+          },
+          "merchant_canonical_name": {
+            "type": "string"
+          },
+          "merchant_custom_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "occurred_on",
+          "payee",
+          "status",
+          "total_minor",
+          "currency",
+          "document_id",
+          "merchant_id",
+          "merchant_canonical_name",
+          "merchant_custom_name"
+        ]
+      },
+      "BrandRollupSibling": {
+        "type": "object",
+        "properties": {
+          "brand_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "icon_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "brand_id",
+          "name",
+          "domain",
+          "icon_url",
+          "location_count"
+        ]
+      },
+      "BrandRollup": {
+        "type": "object",
+        "properties": {
+          "brand": {
+            "$ref": "#/components/schemas/Brand"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/BrandRollupStats"
+          },
+          "locations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrandRollupLocation"
+            }
+          },
+          "recent_transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrandRollupRecentRow"
+            }
+          },
+          "sibling_brands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrandRollupSibling"
+            }
+          }
+        },
+        "required": [
+          "brand",
+          "stats",
+          "locations",
+          "recent_transactions",
+          "sibling_brands"
+        ]
+      },
       "UpdateBrandRequest": {
         "type": "object",
         "properties": {
@@ -3125,151 +3460,6 @@
           "expense_minor",
           "net_minor",
           "buckets"
-        ]
-      },
-      "Merchant": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
-          },
-          "workspace_id": {
-            "type": "string",
-            "format": "uuid",
-            "example": "01HXY9F0ABCDEFGHJKMNPQRSTV"
-          },
-          "brand_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 80,
-            "pattern": "^[a-z0-9-]+$"
-          },
-          "canonical_name": {
-            "type": "string"
-          },
-          "category": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "place_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "photo_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "photo_attribution": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "address": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "lat": {
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "lng": {
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "enrichment_status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "success",
-              "not_found",
-              "failed"
-            ]
-          },
-          "enrichment_attempted_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "custom_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "id",
-          "workspace_id",
-          "brand_id",
-          "canonical_name",
-          "category",
-          "place_id",
-          "photo_url",
-          "photo_attribution",
-          "address",
-          "lat",
-          "lng",
-          "enrichment_status",
-          "enrichment_attempted_at",
-          "custom_name",
-          "created_at",
-          "updated_at"
-        ]
-      },
-      "MerchantStats": {
-        "type": "object",
-        "properties": {
-          "transaction_count": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "lifetime_spend_minor": {
-            "type": "integer"
-          },
-          "current_month_spend_minor": {
-            "type": "integer"
-          },
-          "last_transaction_date": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "currency": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "transaction_count",
-          "lifetime_spend_minor",
-          "current_month_spend_minor",
-          "last_transaction_date",
-          "currency"
         ]
       },
       "MerchantDetail": {
@@ -6200,6 +6390,47 @@
           },
           "404": {
             "description": "Brand or icon unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/brands/{brandId}/rollup": {
+      "get": {
+        "summary": "Brand-level rollup — locations, recent transactions, sibling brands",
+        "description": "Aggregates across every merchant row sharing this brand_id within the workspace. Powers the BrandPage UI (#XXX). Voided transactions excluded from money sums. Sibling brands (same parent_id) included for the Costco-style grouped-brand callout.",
+        "tags": [
+          "brands"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandRollup"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Brand not found",
             "content": {
               "application/problem+json": {
                 "schema": {

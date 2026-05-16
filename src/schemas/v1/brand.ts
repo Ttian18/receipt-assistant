@@ -9,6 +9,7 @@
  */
 import { z } from "zod";
 import { IsoDateTime, Metadata, Uuid } from "./common.js";
+import { Merchant, MerchantStats } from "./merchant.js";
 
 export const BrandAssetTier = z.enum([
   "itunes",
@@ -84,3 +85,70 @@ export const UpdateBrandRequest = z
     domain: z.string().nullable().optional(),
   })
   .openapi("UpdateBrandRequest");
+
+/**
+ * Brand-level rollup stats for `GET /v1/brands/:id/rollup`. Aggregates
+ * across every merchant row sharing this brand_id within the workspace.
+ * Voided transactions excluded from the money sums; still counted in
+ * `location_count`.
+ */
+export const BrandRollupStats = z
+  .object({
+    location_count: z.number().int().nonnegative(),
+    transaction_count: z.number().int().nonnegative(),
+    lifetime_spend_minor: z.number().int(),
+    current_month_spend_minor: z.number().int(),
+    last_transaction_date: z.string().nullable(),
+    currency: z.string(),
+  })
+  .openapi("BrandRollupStats");
+
+/** One row of the rollup's `locations[]` list — a single physical
+ *  store under this brand, with its own per-merchant stats. */
+export const BrandRollupLocation = z
+  .object({
+    merchant: Merchant,
+    stats: MerchantStats,
+  })
+  .openapi("BrandRollupLocation");
+
+/** Compact tx row for the rollup's `recent_transactions[]`. Mirrors
+ *  MerchantTransactionRow plus the originating merchant identity so
+ *  the UI can show "Santa Monica" next to a Starbucks visit. */
+export const BrandRollupRecentRow = z
+  .object({
+    id: Uuid,
+    occurred_on: z.string(),
+    payee: z.string().nullable(),
+    status: z.enum(["draft", "posted", "voided", "reconciled", "error"]),
+    total_minor: z.number().int(),
+    currency: z.string(),
+    document_id: Uuid.nullable(),
+    merchant_id: Uuid,
+    merchant_canonical_name: z.string(),
+    merchant_custom_name: z.string().nullable(),
+  })
+  .openapi("BrandRollupRecentRow");
+
+/** Sibling brand under the same `parent_id` (e.g. Costco Wholesale ↔
+ *  Costco Gas). `location_count` is the sibling's own merchant count,
+ *  helps the UI decide whether to show the callout (only if > 0). */
+export const BrandRollupSibling = z
+  .object({
+    brand_id: z.string(),
+    name: z.string(),
+    domain: z.string().nullable(),
+    icon_url: z.string().nullable(),
+    location_count: z.number().int().nonnegative(),
+  })
+  .openapi("BrandRollupSibling");
+
+export const BrandRollup = z
+  .object({
+    brand: Brand,
+    stats: BrandRollupStats,
+    locations: z.array(BrandRollupLocation),
+    recent_transactions: z.array(BrandRollupRecentRow),
+    sibling_brands: z.array(BrandRollupSibling),
+  })
+  .openapi("BrandRollup");

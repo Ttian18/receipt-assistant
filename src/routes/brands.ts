@@ -19,10 +19,12 @@ import { createHash } from "crypto";
 import multer from "multer";
 import { db } from "../db/client.js";
 import { brands, brandAssets } from "../schema/index.js";
+import { merchants } from "../schema/merchants.js";
 import { parseOrThrow } from "../http/validate.js";
 import {
   Brand,
   BrandAsset,
+  BrandRollup,
   UpdateBrandRequest,
   UploadBrandAssetForm,
 } from "../schemas/v1/brand.js";
@@ -83,6 +85,44 @@ function extensionForMime(mime: string): string {
 function toIsoString(v: unknown): string {
   if (v instanceof Date) return v.toISOString();
   return String(v);
+}
+
+function toInt(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") return value;
+  if (typeof value === "bigint") return Number(value);
+  return Number(value);
+}
+
+function rowToMerchantDto(m: any) {
+  const photoUrl = (m.placeId ?? m.place_id) ? `/v1/merchants/${m.id}/photo` : null;
+  return {
+    id: m.id,
+    workspace_id: m.workspaceId ?? m.workspace_id,
+    brand_id: m.brandId ?? m.brand_id,
+    canonical_name: m.canonicalName ?? m.canonical_name,
+    category: m.category,
+    place_id: m.placeId ?? m.place_id ?? null,
+    photo_url: photoUrl,
+    photo_attribution: m.photoAttribution ?? m.photo_attribution ?? null,
+    address: m.address ?? null,
+    lat: (m.lat === null || m.lat === undefined) ? null : Number(m.lat),
+    lng: (m.lng === null || m.lng === undefined) ? null : Number(m.lng),
+    enrichment_status: m.enrichmentStatus ?? m.enrichment_status,
+    enrichment_attempted_at:
+      m.enrichmentAttemptedAt instanceof Date
+        ? m.enrichmentAttemptedAt.toISOString()
+        : (m.enrichmentAttemptedAt ?? m.enrichment_attempted_at ?? null),
+    custom_name: m.customName ?? m.custom_name ?? null,
+    created_at:
+      m.createdAt instanceof Date
+        ? m.createdAt.toISOString()
+        : (m.createdAt ?? m.created_at),
+    updated_at:
+      m.updatedAt instanceof Date
+        ? m.updatedAt.toISOString()
+        : (m.updatedAt ?? m.updated_at),
+  };
 }
 
 function rowToBrandDto(row: any) {
@@ -525,11 +565,218 @@ brandsRouter.patch(
   },
 );
 
+// ── GET /v1/brands/:brandId/rollup ─────────────────────────────────────
+//
+// Brand-level rollup behind the new BrandPage UI: aggregated stats
+// across every merchant under this brand, the locations list with
+// per-merchant stats, recent transactions across the brand, and any
+// sibling brands sharing the same `parent_id` (Costco group case).
+// Voided transactions excluded from money sums; location_count is the
+// raw merchant row count (independent of activity).
+
+brandsRouter.get(
+  "/:brandId/rollup",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const brandId = String(req.params.brandId);
+      const workspaceId = req.ctx.workspaceId;
+
+      // 1. Brand row
+      const brandRows = await db
+        .select()
+        .from(brands)
+        .where(eq(brands.brandId, brandId));
+      if (brandRows.length === 0) throw new NotFoundProblem("Brand", brandId);
+      const brand = brandRows[0]!;
+
+      // 2. All merchants for this brand in this workspace
+      const merchantRows = await db
+        .select()
+        .from(merchants)
+        .where(and(eq(merchants.workspaceId, workspaceId), eq(merchants.brandId, brandId)));
+
+      // 3. Workspace currency
+      const wsRow = await db.execute(sql`
+        SELECT base_currency FROM workspaces WHERE id = ${workspaceId}::uuid
+      `);
+      const currency = ((wsRow.rows[0] as any)?.base_currency as string) ?? "USD";
+
+      // 4. Per-merchant stats (excluding voided)
+      const perMerchantStats = new Map<
+        string,
+        { txnCount: number; lifetime: number; currentMonth: number; lastDate: string | null }
+      >();
+      let brandTxnCount = 0;
+      let brandLifetime = 0;
+      let brandCurrentMonth = 0;
+      let brandLastDate: string | null = null;
+
+      if (merchantRows.length > 0) {
+        const statsResult = await db.execute(sql`
+          SELECT
+            t.merchant_id::text AS merchant_id,
+            COUNT(DISTINCT t.id)::bigint AS txn_count,
+            COALESCE(SUM(CASE WHEN p.amount_minor > 0 THEN p.amount_minor ELSE 0 END), 0)::bigint AS lifetime,
+            COALESCE(SUM(CASE
+              WHEN p.amount_minor > 0
+               AND t.occurred_on >= date_trunc('month', CURRENT_DATE)::date
+               AND t.occurred_on <  (date_trunc('month', CURRENT_DATE) + interval '1 month')::date
+              THEN p.amount_minor ELSE 0
+            END), 0)::bigint AS current_month,
+            MAX(t.occurred_on)::text AS last_date
+          FROM transactions t
+          JOIN postings p ON p.transaction_id = t.id
+          WHERE t.workspace_id = ${workspaceId}::uuid
+            AND t.merchant_id IN (
+              SELECT id FROM merchants
+              WHERE workspace_id = ${workspaceId}::uuid
+                AND brand_id = ${brandId}
+            )
+            AND t.status <> 'voided'
+          GROUP BY t.merchant_id
+        `);
+        for (const r of statsResult.rows as any[]) {
+          const s = {
+            txnCount: toInt(r.txn_count),
+            lifetime: toInt(r.lifetime),
+            currentMonth: toInt(r.current_month),
+            lastDate: r.last_date,
+          };
+          perMerchantStats.set(r.merchant_id, s);
+          brandTxnCount += s.txnCount;
+          brandLifetime += s.lifetime;
+          brandCurrentMonth += s.currentMonth;
+          if (s.lastDate && (!brandLastDate || s.lastDate > brandLastDate)) {
+            brandLastDate = s.lastDate;
+          }
+        }
+      }
+
+      // 5. Recent transactions across the brand (top 20)
+      let recentTxns: any[] = [];
+      if (merchantRows.length > 0) {
+        const recentResult = await db.execute(sql`
+          SELECT
+            t.id,
+            t.occurred_on::text AS occurred_on,
+            t.payee,
+            t.status::text AS status,
+            t.merchant_id::text AS merchant_id,
+            m.canonical_name AS merchant_canonical_name,
+            m.custom_name AS merchant_custom_name,
+            (
+              SELECT COALESCE(SUM(CASE WHEN p.amount_minor > 0 THEN p.amount_minor ELSE 0 END), 0)::bigint
+              FROM postings p
+              WHERE p.transaction_id = t.id
+            ) AS total_minor,
+            (
+              SELECT p.currency FROM postings p WHERE p.transaction_id = t.id LIMIT 1
+            ) AS row_currency,
+            (
+              SELECT dl.document_id
+              FROM document_links dl
+              WHERE dl.transaction_id = t.id
+              ORDER BY dl.created_at ASC
+              LIMIT 1
+            ) AS document_id
+          FROM transactions t
+          JOIN merchants m ON m.id = t.merchant_id
+          WHERE t.workspace_id = ${workspaceId}::uuid
+            AND m.brand_id = ${brandId}
+            AND m.workspace_id = ${workspaceId}::uuid
+          ORDER BY t.occurred_on DESC, t.id DESC
+          LIMIT 20
+        `);
+        recentTxns = (recentResult.rows as any[]).map((r) => ({
+          id: r.id,
+          occurred_on: r.occurred_on,
+          payee: r.payee,
+          status: r.status,
+          total_minor: toInt(r.total_minor),
+          currency: r.row_currency ?? currency,
+          document_id: r.document_id,
+          merchant_id: r.merchant_id,
+          merchant_canonical_name: r.merchant_canonical_name,
+          merchant_custom_name: r.merchant_custom_name,
+        }));
+      }
+
+      // 6. Sibling brands (same parent_id, not self) — only if parent exists
+      let siblings: any[] = [];
+      if (brand.parentId) {
+        const siblingRows = await db.execute(sql`
+          SELECT
+            b.brand_id,
+            b.name,
+            b.domain,
+            b.preferred_asset_id,
+            COALESCE((
+              SELECT COUNT(*)::bigint
+              FROM merchants m2
+              WHERE m2.workspace_id = ${workspaceId}::uuid
+                AND m2.brand_id = b.brand_id
+            ), 0) AS location_count
+          FROM brands b
+          WHERE b.parent_id = ${brand.parentId}
+            AND b.brand_id <> ${brandId}
+          ORDER BY b.name
+          LIMIT 10
+        `);
+        siblings = (siblingRows.rows as any[]).map((r) => ({
+          brand_id: r.brand_id,
+          name: r.name,
+          domain: r.domain,
+          icon_url: r.preferred_asset_id ? `/v1/brands/${r.brand_id}/icon` : null,
+          location_count: toInt(r.location_count),
+        }));
+      }
+
+      // 7. Build locations array — DTO + per-merchant stats, sorted by spend desc
+      const locations = merchantRows.map((m) => {
+        const s = perMerchantStats.get(m.id);
+        return {
+          merchant: rowToMerchantDto(m),
+          stats: {
+            transaction_count: s?.txnCount ?? 0,
+            lifetime_spend_minor: s?.lifetime ?? 0,
+            current_month_spend_minor: s?.currentMonth ?? 0,
+            last_transaction_date: s?.lastDate ?? null,
+            currency,
+          },
+        };
+      });
+      locations.sort((a, b) => {
+        const d = b.stats.lifetime_spend_minor - a.stats.lifetime_spend_minor;
+        if (d !== 0) return d;
+        return a.merchant.canonical_name.localeCompare(b.merchant.canonical_name);
+      });
+
+      res.json({
+        brand: rowToBrandDto(brand),
+        stats: {
+          location_count: merchantRows.length,
+          transaction_count: brandTxnCount,
+          lifetime_spend_minor: brandLifetime,
+          current_month_spend_minor: brandCurrentMonth,
+          last_transaction_date: brandLastDate,
+          currency,
+        },
+        locations,
+        recent_transactions: recentTxns,
+        sibling_brands: siblings,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // ── OpenAPI registration ───────────────────────────────────────────────
 
 export function registerBrandsOpenApi(registry: OpenAPIRegistry): void {
   registry.register("Brand", Brand);
   registry.register("BrandAsset", BrandAsset);
+  registry.register("BrandRollup", BrandRollup);
   registry.register("UpdateBrandRequest", UpdateBrandRequest);
   registry.register("UploadBrandAssetForm", UploadBrandAssetForm);
 
@@ -651,6 +898,25 @@ export function registerBrandsOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: { description: "Icon bytes" },
       404: { description: "Brand or icon unavailable", content: problemContent },
+    },
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/v1/brands/{brandId}/rollup",
+    summary: "Brand-level rollup — locations, recent transactions, sibling brands",
+    description:
+      "Aggregates across every merchant row sharing this brand_id within the workspace. " +
+      "Powers the BrandPage UI (#XXX). Voided transactions excluded from money sums. " +
+      "Sibling brands (same parent_id) included for the Costco-style grouped-brand callout.",
+    tags: ["brands"],
+    request: { params: z.object({ brandId: z.string() }) },
+    responses: {
+      200: {
+        description: "OK",
+        content: { "application/json": { schema: BrandRollup } },
+      },
+      404: { description: "Brand not found", content: problemContent },
     },
   });
 
